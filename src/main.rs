@@ -81,7 +81,7 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
             // Meteora task
             match timeout(
                 REQUEST_TIMEOUT,
-                fetch_meteora_pools(&token_a, &token_b, Some(1), Some(5)),
+                fetch_meteora_pools(&token_a, &token_b, Some(0), Some(5)),
             )
             .await
             {
@@ -347,13 +347,15 @@ pub async fn token_price_analysis(token_a_mint: &str, token_b_mint: &str) -> Res
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Fetching data for SOL/USDC pools...");
-
-    let sol_mint = "So11111111111111111111111111111111111111112"; // wSOL
-    let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
+    let token_a_mint = "So11111111111111111111111111111111111111112";
+    let token_b_mint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+    println!(
+        "Fetching data for {}/{} pools...",
+        token_a_mint, token_b_mint
+    );
 
     // Execute the analysis
-    match token_price_analysis(sol_mint, usdc_mint).await {
+    match token_price_analysis(token_a_mint, token_b_mint).await {
         Ok(best_pool) => {
             println!("\n📊 ANALYSIS RESULTS 📊");
             println!("Best pool found on: {}", best_pool.amm);
