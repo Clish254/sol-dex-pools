@@ -14,7 +14,8 @@ use splice_test::{
 };
 use std::env;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10); // 10 second timeout for API requests
+const SOL_PRICE_USD: f64 = 250.0;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20); // 10 second timeout for API requests
 
 /// Structure for pool analysis results
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +124,17 @@ async fn process_raydium_pools(
     let mut pools_lock = results.lock().await;
 
     for pool in raydium_data.data.pools {
+        // Calculate USD price from SOL price
+        let price_usd = if pool.mint_a.address == "So11111111111111111111111111111111111111112" {
+            // If SOL is token A, price is in other token per SOL, so multiply by SOL price
+            pool.price * SOL_PRICE_USD
+        } else if pool.mint_b.address == "So11111111111111111111111111111111111111112" {
+            // If SOL is token B, price is in SOL per other token, so calculate token price in USD
+            pool.price * SOL_PRICE_USD
+        } else {
+            // If neither token is SOL, use the price as is (but ideally would need a reference price)
+            pool.price
+        };
         // Calculate liquidity in USD
         let liquidity_usd = pool.tvl;
 
@@ -156,7 +168,7 @@ async fn process_raydium_pools(
             amm: "Raydium".to_string(),
             name: format!("{}-{}", pool.mint_a.symbol, pool.mint_b.symbol),
             pool_address: pool.id.clone(),
-            price_usd: pool.price,
+            price_usd,
             liquidity_usd,
             fee_percentage: pool.fee_rate * 100.0,
             volume_24h: Some(pool.day.volume),
@@ -173,14 +185,17 @@ async fn process_orca_pools(orca_pools: Vec<OrcaPoolInfo>, results: Arc<Mutex<Ve
     let mut pools_lock = results.lock().await;
 
     for pool in orca_pools {
-        // Use the current price from the pool
-        let price = pool.price;
+        // Get the base price from the pool
+        let sol_price = pool.price;
+
+        // Convert to USD price
+        let price_usd = sol_price * SOL_PRICE_USD;
 
         // Estimate liquidity in USD - this is a rough estimation
         // Convert raw liquidity to approximate USD value
         // Orca's liquidity is in "virtual" units, need to convert to USD
         let liquidity_factor = 1.0e-9; // Conversion factor, may need adjustment
-        let liquidity_usd = pool.data.liquidity as f64 * liquidity_factor * price;
+        let liquidity_usd = pool.data.liquidity as f64 * liquidity_factor * price_usd;
 
         // Calculate health score
         let liquidity_weight = 0.7; // 70% weight for liquidity
@@ -204,7 +219,7 @@ async fn process_orca_pools(orca_pools: Vec<OrcaPoolInfo>, results: Arc<Mutex<Ve
             amm: "Orca".to_string(),
             name: format!("Whirlpool-{}", pool.data.tick_spacing),
             pool_address: pool.address.to_string(),
-            price_usd: price,
+            price_usd,
             liquidity_usd,
             fee_percentage: fee_rate * 100.0,
             volume_24h: None, // Orca API doesn't provide volume data directly
@@ -225,10 +240,12 @@ async fn process_meteora_pools(
 
     for pool in meteora_data.data {
         // Extract price - assuming SOL/USDC pool structure
-        let price = match calc_meteora_price(&pool) {
+        let sol_price = match calc_meteora_price(&pool) {
             Some(p) => p,
             None => continue, // Skip this pool if price calculation fails
         };
+
+        let price_usd = sol_price * SOL_PRICE_USD;
 
         // Get liquidity in USD
         let liquidity_usd = match pool.pool_tvl.parse::<f64>() {
@@ -269,7 +286,7 @@ async fn process_meteora_pools(
             amm: "Meteora".to_string(),
             name: pool.pool_name.clone(),
             pool_address: pool.pool_address.clone(),
-            price_usd: price,
+            price_usd,
             liquidity_usd,
             fee_percentage,
             volume_24h: Some(pool.trading_volume),
@@ -279,7 +296,6 @@ async fn process_meteora_pools(
 }
 
 fn calc_meteora_price(pool: &MeteoraPoolInfo) -> Option<f64> {
-    // Find the indices for tokens in the pool
     let (token0_amount, token1_amount) = match (
         pool.pool_token_amounts[0].parse::<f64>(),
         pool.pool_token_amounts[1].parse::<f64>(),
@@ -290,21 +306,23 @@ fn calc_meteora_price(pool: &MeteoraPoolInfo) -> Option<f64> {
 
     // Check if this is a SOL pool and calculate price accordingly
     if pool.pool_token_mints[0] == "So11111111111111111111111111111111111111112" {
-        // SOL is token0, calculate price as token1/token0
-        if token0_amount > 0.0 {
-            Some(token1_amount / token0_amount)
-        } else {
-            None
-        }
-    } else if pool.pool_token_mints[1] == "So11111111111111111111111111111111111111112" {
-        // SOL is token1, calculate price as token0/token1
+        // SOL is token0, calculate price as token0/token1 (inverse of the current calculation)
+        // This will give us token price in SOL terms
         if token1_amount > 0.0 {
             Some(token0_amount / token1_amount)
         } else {
             None
         }
+    } else if pool.pool_token_mints[1] == "So11111111111111111111111111111111111111112" {
+        // SOL is token1, calculate price as token1/token0 (inverse of the current calculation)
+        // This will give us token price in SOL terms
+        if token0_amount > 0.0 {
+            Some(token1_amount / token0_amount)
+        } else {
+            None
+        }
     } else {
-        // Not a SOL pool, return the ratio anyway
+        // Not a SOL pool, use some other reference (this would need additional logic)
         if token0_amount > 0.0 {
             Some(token1_amount / token0_amount)
         } else {
