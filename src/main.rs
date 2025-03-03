@@ -567,8 +567,8 @@ fn find_healthiest_pool(pools: &[PoolAnalysis]) -> Option<PoolAnalysis> {
         .cloned()
 }
 
-/// Entry point for the token price and liquidity analysis
-pub async fn token_price_analysis(token_a_mint: &str, token_b_mint: &str) -> Result<PoolAnalysis> {
+/// Entry point for pools analysis
+pub async fn token_pools_analysis(token_a_mint: &str, token_b_mint: &str) -> Result<PoolAnalysis> {
     // Get all pools data in parallel
     let all_pools = get_pools_data(token_a_mint, token_b_mint).await?;
 
@@ -596,7 +596,7 @@ async fn main() -> Result<()> {
         token_a_mint, token_b_mint
     );
 
-    match token_price_analysis(token_a_mint, token_b_mint).await {
+    match token_pools_analysis(token_a_mint, token_b_mint).await {
         Ok(best_pool) => {
             println!("\n📊 ANALYSIS RESULTS 📊");
             println!("Best pool found on: {}", best_pool.amm);
