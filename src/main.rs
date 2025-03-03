@@ -5,15 +5,16 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use dotenvy::dotenv;
-use orca_whirlpools::InitializedPool as OrcaPoolInfo;
+//use dotenvy::dotenv;
+//use orca_whirlpools::InitializedPool as OrcaPoolInfo;
 use splice_test::{
     meteora::{fetch_meteora_pools, MeteoraPoolResponse, PoolInfo as MeteoraPoolInfo},
     meteora_dlmm::{fetch_meteora_dlmm_pools, MeteoraGroupsResponse},
+    orca::{fetch_orca_pools, OrcaApiResponse},
     raydium::{fetch_raydium_pools, RaydiumPoolResponse},
-    whirlpools::fetch_initialized_whirlpools,
+    //whirlpools::fetch_initialized_whirlpools,
 };
-use std::env;
+//use std::env;
 
 const SOL_PRICE_USD: f64 = 250.0;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20); // 10 second timeout for API requests
@@ -32,8 +33,8 @@ pub struct PoolAnalysis {
 }
 
 async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<PoolAnalysis>> {
-    dotenv().ok();
-    let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set in .env");
+    //dotenv().ok();
+    //let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set in .env");
     // Results collection
     let results = Arc::new(Mutex::new(Vec::new()));
 
@@ -41,12 +42,14 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
     let token_a = token_a_mint.to_string();
     let token_b = token_b_mint.to_string();
     let results_raydium = Arc::clone(&results);
-    let results_orca = Arc::clone(&results);
+    //let _results_orca = Arc::clone(&results);
     let results_meteora = Arc::clone(&results);
     let results_meteora_dlmm = Arc::clone(&results);
 
+    let results_orca_api = Arc::clone(&results);
+
     // Run all fetches concurrently using tokio::join
-    let (raydium_result, orca_result, meteora_result, meteora_dlmm_result) = tokio::join!(
+    let (raydium_result, orca_api_result, meteora_result, meteora_dlmm_result) = tokio::join!(
         async {
             // Raydium task
             match timeout(
@@ -63,21 +66,37 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
                 Err(_) => Err("Raydium request timed out".to_string()),
             }
         },
+        //async {
+        //    // Orca sdk task - need to handle non-Send error
+        //    // Wrap in timeout to avoid hanging
+        //    match timeout(
+        //        REQUEST_TIMEOUT,
+        //        fetch_initialized_whirlpools(&rpc_url, &token_a, &token_b, None),
+        //    )
+        //    .await
+        //    {
+        //        Ok(Ok(orca_pools)) => {
+        //            process_orca_sdk_pools(orca_pools, results_orca).await;
+        //            Ok(())
+        //        }
+        //        Ok(Err(e)) => Err(format!("Orca error: {}", e)),
+        //        Err(_) => Err("Orca request timed out".to_string()),
+        //    }
+        //},
         async {
-            // Orca task - need to handle non-Send error
-            // Wrap in timeout to avoid hanging
+            // Orca API task
             match timeout(
                 REQUEST_TIMEOUT,
-                fetch_initialized_whirlpools(&rpc_url, &token_a, &token_b, None),
+                fetch_orca_pools(&token_a, &token_b, Some(50)),
             )
             .await
             {
-                Ok(Ok(orca_pools)) => {
-                    process_orca_pools(orca_pools, results_orca).await;
+                Ok(Ok(orca_api_data)) => {
+                    process_orca_api_pools(orca_api_data, results_orca_api).await;
                     Ok(())
                 }
-                Ok(Err(e)) => Err(format!("Orca error: {}", e)),
-                Err(_) => Err("Orca request timed out".to_string()),
+                Ok(Err(e)) => Err(format!("Orca API error: {}", e)),
+                Err(_) => Err("Orca API request timed out".to_string()),
             }
         },
         async {
@@ -118,14 +137,17 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
     if let Err(e) = raydium_result {
         eprintln!("Warning: Raydium fetch failed: {}", e);
     }
-    if let Err(e) = orca_result {
-        eprintln!("Warning: Orca fetch failed: {}", e);
-    }
+    //if let Err(e) = orca_result {
+    //    eprintln!("Warning: Orca fetch failed: {}", e);
+    //}
     if let Err(e) = meteora_result {
         eprintln!("Warning: Meteora fetch failed: {}", e);
     }
     if let Err(e) = meteora_dlmm_result {
         eprintln!("Warning: Meteora DLMM fetch failed: {}", e);
+    }
+    if let Err(e) = orca_api_result {
+        eprintln!("Warning: Orca API fetch failed: {}", e);
     }
 
     // Get the locked results
@@ -203,62 +225,65 @@ async fn process_raydium_pools(
     }
 }
 
-async fn process_orca_pools(orca_pools: Vec<OrcaPoolInfo>, results: Arc<Mutex<Vec<PoolAnalysis>>>) {
-    if orca_pools.is_empty() {
-        return;
-    }
-
-    let mut pools_lock = results.lock().await;
-
-    for pool in orca_pools {
-        // Get the base price from the pool
-        let sol_price = pool.price;
-
-        // Convert to USD price
-        let price_usd = sol_price * SOL_PRICE_USD;
-
-        // Estimate liquidity in USD - this is a rough estimation
-        // Convert raw liquidity to approximate USD value
-        // Orca's liquidity is in "virtual" units, need to convert to USD
-        let liquidity_factor = 1.0e-9; // Conversion factor, may need adjustment
-        let liquidity_usd = pool.data.liquidity as f64 * liquidity_factor * price_usd;
-
-        // Calculate health score with adjusted weights
-        let liquidity_weight = 0.7; // Prioritize liquidity since no volume data
-        let fee_weight = 0.3; // Weight for fees
-
-        // More reasonable fee normalization
-        let fee_rate = pool.data.fee_rate as f64 / 10000.0;
-        let normalized_fee = if fee_rate < 5.0 {
-            1.0 - (fee_rate / 5.0)
-        } else {
-            0.0 // Floor at zero
-        };
-
-        // Calculate score components - apply a volume estimate based on liquidity
-        // for pools with missing volume data to avoid unfair disadvantage
-        let liquidity_score = if liquidity_usd > 0.0 {
-            (liquidity_usd.log10() / 7.0).min(1.0) // Log scale, assuming $10M liquidity is max score
-        } else {
-            0.0
-        };
-
-        // Calculate overall score - no volume data available
-        // We'll use the liquidity as a proxy for potential volume
-        let score = (liquidity_score * liquidity_weight) + (normalized_fee * fee_weight);
-
-        pools_lock.push(PoolAnalysis {
-            amm: "Orca".to_string(),
-            name: format!("Whirlpool-{}", pool.data.tick_spacing),
-            pool_address: pool.address.to_string(),
-            price_usd,
-            liquidity_usd,
-            fee_percentage: fee_rate * 100.0,
-            volume_24h: None, // Orca API doesn't provide volume data directly
-            score,
-        });
-    }
-}
+//async fn process_orca_sdk_pools(
+//    orca_pools: Vec<OrcaPoolInfo>,
+//    results: Arc<Mutex<Vec<PoolAnalysis>>>,
+//) {
+//    if orca_pools.is_empty() {
+//        return;
+//    }
+//
+//    let mut pools_lock = results.lock().await;
+//
+//    for pool in orca_pools {
+//        // Get the base price from the pool
+//        let sol_price = pool.price;
+//
+//        // Convert to USD price
+//        let price_usd = sol_price * SOL_PRICE_USD;
+//
+//        // Estimate liquidity in USD - this is a rough estimation
+//        // Convert raw liquidity to approximate USD value
+//        // Orca's liquidity is in "virtual" units, need to convert to USD
+//        let liquidity_factor = 1.0e-9; // Conversion factor, may need adjustment
+//        let liquidity_usd = pool.data.liquidity as f64 * liquidity_factor * price_usd;
+//
+//        // Calculate health score with adjusted weights
+//        let liquidity_weight = 0.7; // Prioritize liquidity since no volume data
+//        let fee_weight = 0.3; // Weight for fees
+//
+//        // More reasonable fee normalization
+//        let fee_rate = pool.data.fee_rate as f64 / 10000.0;
+//        let normalized_fee = if fee_rate < 5.0 {
+//            1.0 - (fee_rate / 5.0)
+//        } else {
+//            0.0 // Floor at zero
+//        };
+//
+//        // Calculate score components - apply a volume estimate based on liquidity
+//        // for pools with missing volume data to avoid unfair disadvantage
+//        let liquidity_score = if liquidity_usd > 0.0 {
+//            (liquidity_usd.log10() / 7.0).min(1.0) // Log scale, assuming $10M liquidity is max score
+//        } else {
+//            0.0
+//        };
+//
+//        // Calculate overall score - no volume data available
+//        // We'll use the liquidity as a proxy for potential volume
+//        let score = (liquidity_score * liquidity_weight) + (normalized_fee * fee_weight);
+//
+//        pools_lock.push(PoolAnalysis {
+//            amm: "Orca".to_string(),
+//            name: format!("Whirlpool-{}", pool.data.tick_spacing),
+//            pool_address: pool.address.to_string(),
+//            price_usd,
+//            liquidity_usd,
+//            fee_percentage: fee_rate * 100.0,
+//            volume_24h: None, // Orca API doesn't provide volume data directly
+//            score,
+//        });
+//    }
+//}
 
 async fn process_meteora_pools(
     meteora_data: MeteoraPoolResponse,
@@ -414,6 +439,86 @@ async fn process_meteora_dlmm_pools(
     }
 }
 
+async fn process_orca_api_pools(
+    orca_api_data: OrcaApiResponse,
+    results: Arc<Mutex<Vec<PoolAnalysis>>>,
+) {
+    if orca_api_data.data.is_empty() {
+        return;
+    }
+
+    let mut pools_lock = results.lock().await;
+
+    for pool in orca_api_data.data {
+        // Parse the price string
+        let price = match pool.price.parse::<f64>() {
+            Ok(p) => p,
+            Err(_) => continue, // Skip this pool if price parsing fails
+        };
+
+        // Convert to USD price
+        let price_usd = price * SOL_PRICE_USD;
+
+        // Parse TVL in USD
+        let liquidity_usd = match pool.tvl_usdc.parse::<f64>() {
+            Ok(tvl) => tvl,
+            Err(_) => continue, // Skip this pool if TVL parsing fails
+        };
+
+        // Calculate fee percentage (convert from basis points to percentage)
+        let fee_percentage = pool.fee_rate as f64 / 100.0;
+
+        // Parse 24h volume if available
+        let volume_24h = match &pool.stats.day.volume {
+            Some(vol_str) => match vol_str.parse::<f64>() {
+                Ok(vol) => Some(vol),
+                Err(_) => None,
+            },
+            None => None,
+        };
+
+        // Calculate health score with adjusted weights
+        let volume_weight = 0.45;
+        let liquidity_weight = 0.45;
+        let fee_weight = 0.1;
+
+        // More reasonable fee normalization
+        let normalized_fee = if fee_percentage < 5.0 {
+            1.0 - (fee_percentage / 5.0)
+        } else {
+            0.0 // Floor at zero
+        };
+
+        // Calculate score components
+        let volume_score = match volume_24h {
+            Some(volume) if volume > 0.0 => (volume.log10() / 7.0).min(1.0),
+            _ => 0.0,
+        };
+
+        let liquidity_score = if liquidity_usd > 0.0 {
+            (liquidity_usd.log10() / 7.0).min(1.0)
+        } else {
+            0.0
+        };
+
+        // Calculate overall score
+        let score = (volume_score * volume_weight)
+            + (liquidity_score * liquidity_weight)
+            + (normalized_fee * fee_weight);
+
+        pools_lock.push(PoolAnalysis {
+            amm: "Orca API".to_string(),
+            name: format!("{}-{}", pool.token_a.symbol, pool.token_b.symbol),
+            pool_address: pool.address,
+            price_usd,
+            liquidity_usd,
+            fee_percentage,
+            volume_24h,
+            score,
+        });
+    }
+}
+
 fn calc_meteora_price(pool: &MeteoraPoolInfo) -> Option<f64> {
     let (token0_amount, token1_amount) = match (
         pool.pool_token_amounts[0].parse::<f64>(),
@@ -491,7 +596,6 @@ async fn main() -> Result<()> {
         token_a_mint, token_b_mint
     );
 
-    // Execute the analysis
     match token_price_analysis(token_a_mint, token_b_mint).await {
         Ok(best_pool) => {
             println!("\n📊 ANALYSIS RESULTS 📊");
