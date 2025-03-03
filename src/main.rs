@@ -15,7 +15,7 @@ use splice_test::{
 };
 use std::env;
 
-const SOL_PRICE_USD: f64 = 161.0;
+const SOL_PRICE_USD: f64 = 250.0;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20); // 10 second timeout for API requests
 
 /// Structure for pool analysis results
