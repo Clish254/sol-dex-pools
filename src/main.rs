@@ -43,7 +43,6 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
     let results_raydium = Arc::clone(&results);
     let results_orca = Arc::clone(&results);
     let results_meteora = Arc::clone(&results);
-
     let results_meteora_dlmm = Arc::clone(&results);
 
     // Run all fetches concurrently using tokio::join
@@ -160,13 +159,18 @@ async fn process_raydium_pools(
         // Calculate liquidity in USD
         let liquidity_usd = pool.tvl;
 
-        // Calculate health score - weighing factors can be adjusted as needed
-        let volume_weight = 0.4; // 40% weight for volume
-        let liquidity_weight = 0.5; // 50% weight for liquidity
-        let fee_weight = 0.1; // 10% weight for low fees (inverted)
+        // Calculate health score with adjusted weights and fee normalization
+        let volume_weight = 0.45; // Increased weight for volume (was 0.4)
+        let liquidity_weight = 0.45; // Maintained similar weight for liquidity (was 0.5)
+        let fee_weight = 0.1; // Same weight for fees but with different normalization
 
-        // Normalize fee (lower is better) - invert percentage
-        let normalized_fee = 1.0 - (pool.fee_rate / 0.01); // Assuming 1% is the max fee
+        // More reasonable fee normalization that doesn't heavily penalize higher fees
+        // Using 5% as the threshold for normalization instead of 1%
+        let normalized_fee = if pool.fee_rate < 5.0 {
+            1.0 - (pool.fee_rate / 5.0)
+        } else {
+            0.0 // Floor at zero instead of going negative for high fees
+        };
 
         // Calculate score components
         let volume_score = if pool.day.volume > 0.0 {
@@ -219,15 +223,20 @@ async fn process_orca_pools(orca_pools: Vec<OrcaPoolInfo>, results: Arc<Mutex<Ve
         let liquidity_factor = 1.0e-9; // Conversion factor, may need adjustment
         let liquidity_usd = pool.data.liquidity as f64 * liquidity_factor * price_usd;
 
-        // Calculate health score
-        let liquidity_weight = 0.7; // 70% weight for liquidity
-        let fee_weight = 0.3; // 30% weight for low fees (inverted)
+        // Calculate health score with adjusted weights
+        let liquidity_weight = 0.7; // Prioritize liquidity since no volume data
+        let fee_weight = 0.3; // Weight for fees
 
-        // Normalize fee (lower is better) - invert percentage
+        // More reasonable fee normalization
         let fee_rate = pool.data.fee_rate as f64 / 10000.0;
-        let normalized_fee = 1.0 - (fee_rate / 0.01); // Assuming 1% is the max fee
+        let normalized_fee = if fee_rate < 5.0 {
+            1.0 - (fee_rate / 5.0)
+        } else {
+            0.0 // Floor at zero
+        };
 
-        // Calculate score components
+        // Calculate score components - apply a volume estimate based on liquidity
+        // for pools with missing volume data to avoid unfair disadvantage
         let liquidity_score = if liquidity_usd > 0.0 {
             (liquidity_usd.log10() / 7.0).min(1.0) // Log scale, assuming $10M liquidity is max score
         } else {
@@ -235,6 +244,7 @@ async fn process_orca_pools(orca_pools: Vec<OrcaPoolInfo>, results: Arc<Mutex<Ve
         };
 
         // Calculate overall score - no volume data available
+        // We'll use the liquidity as a proxy for potential volume
         let score = (liquidity_score * liquidity_weight) + (normalized_fee * fee_weight);
 
         pools_lock.push(PoolAnalysis {
@@ -278,13 +288,17 @@ async fn process_meteora_pools(
         // Parse fee percentage
         let fee_percentage = pool.total_fee_pct.parse::<f64>().unwrap_or(0.0);
 
-        // Calculate health score
-        let volume_weight = 0.4; // 40% weight for volume
-        let liquidity_weight = 0.5; // 50% weight for liquidity
-        let fee_weight = 0.1; // 10% weight for low fees (inverted)
+        // Calculate health score with adjusted weights
+        let volume_weight = 0.45; // Increased weight for volume (was 0.4)
+        let liquidity_weight = 0.45; // Maintained similar weight for liquidity (was 0.5)
+        let fee_weight = 0.1; // Same weight for fees but with different normalization
 
-        // Normalize fee (lower is better) - invert percentage
-        let normalized_fee = 1.0 - (fee_percentage / 1.0); // Assuming 1% is the max fee
+        // More reasonable fee normalization
+        let normalized_fee = if fee_percentage < 5.0 {
+            1.0 - (fee_percentage / 5.0)
+        } else {
+            0.0 // Floor at zero
+        };
 
         // Calculate score components
         let volume_score = if pool.trading_volume > 0.0 {
@@ -316,6 +330,7 @@ async fn process_meteora_pools(
         });
     }
 }
+
 async fn process_meteora_dlmm_pools(
     meteora_dlmm_data: MeteoraGroupsResponse,
     results: Arc<Mutex<Vec<PoolAnalysis>>>,
@@ -342,13 +357,18 @@ async fn process_meteora_dlmm_pools(
             // Parse fee percentage
             let base_fee_percentage = pair.base_fee_percentage.parse::<f64>().unwrap_or(0.0);
 
-            // Calculate health score
-            let volume_weight = 0.4; // 40% weight for volume
-            let liquidity_weight = 0.5; // 50% weight for liquidity
-            let fee_weight = 0.1; // 10% weight for low fees (inverted)
+            // Calculate health score with adjusted weights
+            let volume_weight = 0.45; // Increased weight for volume (was 0.4)
+            let liquidity_weight = 0.45; // Maintained similar weight for liquidity (was 0.5)
+            let fee_weight = 0.1; // Same weight for fees but with different normalization
 
-            // Normalize fee (lower is better) - invert percentage
-            let normalized_fee = 1.0 - (base_fee_percentage / 0.01); // Assuming 1% is the max fee
+            // More reasonable fee normalization that doesn't heavily penalize higher fees
+            // Using 5% as the threshold for normalization instead of 1%
+            let normalized_fee = if base_fee_percentage < 5.0 {
+                1.0 - (base_fee_percentage / 5.0)
+            } else {
+                0.0 // Floor at zero instead of going negative for high fees
+            };
 
             // Calculate score components
             let volume_score = if pair.trade_volume_24h > 0.0 {
