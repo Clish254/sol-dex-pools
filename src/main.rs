@@ -9,12 +9,13 @@ use dotenvy::dotenv;
 use orca_whirlpools::InitializedPool as OrcaPoolInfo;
 use splice_test::{
     meteora::{fetch_meteora_pools, MeteoraPoolResponse, PoolInfo as MeteoraPoolInfo},
+    meteora_dlmm::{fetch_meteora_dlmm_pools, MeteoraGroupsResponse},
     raydium::{fetch_raydium_pools, RaydiumPoolResponse},
     whirlpools::fetch_initialized_whirlpools,
 };
 use std::env;
 
-const SOL_PRICE_USD: f64 = 250.0;
+const SOL_PRICE_USD: f64 = 161.0;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20); // 10 second timeout for API requests
 
 /// Structure for pool analysis results
@@ -43,13 +44,15 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
     let results_orca = Arc::clone(&results);
     let results_meteora = Arc::clone(&results);
 
+    let results_meteora_dlmm = Arc::clone(&results);
+
     // Run all fetches concurrently using tokio::join
-    let (raydium_result, orca_result, meteora_result) = tokio::join!(
+    let (raydium_result, orca_result, meteora_result, meteora_dlmm_result) = tokio::join!(
         async {
             // Raydium task
             match timeout(
                 REQUEST_TIMEOUT,
-                fetch_raydium_pools(&token_a, &token_b, Some(5), Some(1)),
+                fetch_raydium_pools(&token_a, &token_b, Some(10), Some(1)),
             )
             .await
             {
@@ -82,7 +85,7 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
             // Meteora task
             match timeout(
                 REQUEST_TIMEOUT,
-                fetch_meteora_pools(&token_a, &token_b, Some(0), Some(5)),
+                fetch_meteora_pools(&token_a, &token_b, Some(0), Some(10)),
             )
             .await
             {
@@ -92,6 +95,22 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
                 }
                 Ok(Err(e)) => Err(format!("Meteora error: {}", e)),
                 Err(_) => Err("Meteora request timed out".to_string()),
+            }
+        },
+        async {
+            // Meteora DLMM task
+            match timeout(
+                REQUEST_TIMEOUT,
+                fetch_meteora_dlmm_pools(&token_a, &token_b, Some(0), Some(10)),
+            )
+            .await
+            {
+                Ok(Ok(meteora_dlmm_data)) => {
+                    process_meteora_dlmm_pools(meteora_dlmm_data, results_meteora_dlmm).await;
+                    Ok(())
+                }
+                Ok(Err(e)) => Err(format!("Meteora DLMM error: {}", e)),
+                Err(_) => Err("Meteora DLMM request timed out".to_string()),
             }
         }
     );
@@ -105,6 +124,9 @@ async fn get_pools_data(token_a_mint: &str, token_b_mint: &str) -> Result<Vec<Po
     }
     if let Err(e) = meteora_result {
         eprintln!("Warning: Meteora fetch failed: {}", e);
+    }
+    if let Err(e) = meteora_dlmm_result {
+        eprintln!("Warning: Meteora DLMM fetch failed: {}", e);
     }
 
     // Get the locked results
@@ -294,6 +316,83 @@ async fn process_meteora_pools(
         });
     }
 }
+async fn process_meteora_dlmm_pools(
+    meteora_dlmm_data: MeteoraGroupsResponse,
+    results: Arc<Mutex<Vec<PoolAnalysis>>>,
+) {
+    if meteora_dlmm_data.groups.is_empty() {
+        return;
+    }
+
+    let mut pools_lock = results.lock().await;
+
+    for group in &meteora_dlmm_data.groups {
+        for pair in &group.pairs {
+            // Skip hidden or blacklisted pools
+            if pair.hide || pair.is_blacklisted {
+                continue;
+            }
+
+            // Skip pools with no liquidity
+            let liquidity_usd = match pair.liquidity.parse::<f64>() {
+                Ok(liq) if liq > 0.0 => liq,
+                _ => continue,
+            };
+
+            // Parse fee percentage
+            let base_fee_percentage = pair.base_fee_percentage.parse::<f64>().unwrap_or(0.0);
+
+            // Calculate health score
+            let volume_weight = 0.4; // 40% weight for volume
+            let liquidity_weight = 0.5; // 50% weight for liquidity
+            let fee_weight = 0.1; // 10% weight for low fees (inverted)
+
+            // Normalize fee (lower is better) - invert percentage
+            let normalized_fee = 1.0 - (base_fee_percentage / 0.01); // Assuming 1% is the max fee
+
+            // Calculate score components
+            let volume_score = if pair.trade_volume_24h > 0.0 {
+                (pair.trade_volume_24h.log10() / 7.0).min(1.0) // Log scale, assuming $10M daily volume is max score
+            } else {
+                0.0
+            };
+
+            let liquidity_score = if liquidity_usd > 0.0 {
+                (liquidity_usd.log10() / 7.0).min(1.0) // Log scale, assuming $10M liquidity is max score
+            } else {
+                0.0
+            };
+
+            // Calculate overall score
+            let score = (volume_score * volume_weight)
+                + (liquidity_score * liquidity_weight)
+                + (normalized_fee * fee_weight);
+
+            // Calculate price in USD
+            let price_usd = if pair.mint_y == "So11111111111111111111111111111111111111112" {
+                // If SOL is token Y, multiply price by SOL price
+                pair.current_price * SOL_PRICE_USD
+            } else if pair.mint_x == "So11111111111111111111111111111111111111112" {
+                // If SOL is token X, calculate token price in USD
+                pair.current_price * SOL_PRICE_USD
+            } else {
+                // If neither token is SOL, use the price as is
+                pair.current_price
+            };
+
+            pools_lock.push(PoolAnalysis {
+                amm: "Meteora DLMM".to_string(),
+                name: pair.name.clone(),
+                pool_address: pair.address.clone(),
+                price_usd,
+                liquidity_usd,
+                fee_percentage: base_fee_percentage * 100.0, // Convert to percentage format
+                volume_24h: Some(pair.trade_volume_24h),
+                score,
+            });
+        }
+    }
+}
 
 fn calc_meteora_price(pool: &MeteoraPoolInfo) -> Option<f64> {
     let (token0_amount, token1_amount) = match (
@@ -365,8 +464,8 @@ pub async fn token_price_analysis(token_a_mint: &str, token_b_mint: &str) -> Res
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let token_a_mint = "So11111111111111111111111111111111111111112";
-    let token_b_mint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+    let token_b_mint = "So11111111111111111111111111111111111111112";
+    let token_a_mint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
     println!(
         "Fetching data for {}/{} pools...",
         token_a_mint, token_b_mint
@@ -389,6 +488,5 @@ async fn main() -> Result<()> {
         }
         Err(e) => println!("Error analyzing pools: {}", e),
     }
-
     Ok(())
 }
